@@ -1,0 +1,899 @@
+---
+title: "Utilizing NLCD Data and Spatializing Ames"
+author: "David Barbour"
+date: "2025-01-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("C:/Users/Dacat/OneDrive/NLCD data tutorial")
+```
+
+
+Please note:
+rJava is required for OpenStreetMap satellite images, rJava also requires Java to be installed on your PC. This file is running with Version 8 Update 431 (Build 1.8.0_431-b10) installed on the host PC.
+
+Skipping the OpenStreetMap portion will allow you avoid these packages and skip this step. While visualizing the area may be useful in analysis by giving an expectation of what the data should match to, it is not needed to extract the data for testing itself.
+
+ggplot2 (for visualization) and dplyr (for data manipulation) are included as part of the tidyverse package.
+
+
+
+Load Required Libraries
+
+This chunk installs and loads the necessary R libraries for working with National Land Cover Database (NLCD) data and performing spatial data analysis.
+```{r}
+#Uncomment the following if packages haven't been installed before
+#install.packages(c("sf", "raster", "tigris", "rJava", "FedData", "OpenStreetMap", "tidyverse", "exactextractr"))
+
+# Load required libraries:
+library(sf)             # Simple Features (sf) for vector data processing
+library(raster)         # For raster data manipulation
+library(tigris)         # For downloading US Census geospatial data
+library(rJava)          # Java integration for OpenStreetMap usage
+library(FedData)        # Federal datasets, including NLCD
+library(OpenStreetMap)  # Visualization and satellite imagery
+library(tidyverse)      # Collection of packages (ggplot2, dplyr, etc.)
+library(exactextractr)  # Efficient raster extraction using polygons
+```
+
+
+
+
+Pull your county from tigris package
+```{r}
+
+# Retrieve the polygon for Story County, Iowa (containing Ames)
+Story <- 
+  tigris::counties(state = "IA", year = 2011) %>%  # Get all counties in Iowa for 2011
+  dplyr::filter(NAME == "Story")                  # Filter to only Story County
+```
+
+Something to note with the Tigris package is that it will default to pulling boundaries from 2022. Possible mismatch in boundaries could exist depending on time period and location due to shifting boundaries (Expansion, Annexation, Separation). Explicitly calling a year (as done above) may prove useful but be sure to cross reference available years with the census Bureau's TIGER/Line Shapefiles.
+
+Pull NLCD for that county
+```{r}
+# Retrieve NLCD (National Land Cover Database) data for Story County
+nlcd_data_county <- 
+  FedData::get_nlcd(
+    template = Story,    # The spatial template created above to define the area of interest
+    year = 2011,         # Specify the NLCD dataset year to match analysis requirements
+    label = "Story"     # Label used for naming downloaded files and intermediate outputs
+  )
+```
+
+
+
+
+By Rastering you're essentially changing lines and vectors into pixels or "cells" with data. Like a .SVG to .PNG or .JPEG
+
+A constant throughout this process is to make sure that your data match CRS (Coordinate Recognition System). Your CRS code is essentially a projected tile on the earth while Longitude Latitude combinations are points in those tiles. WGS84 (EPSG:4326) is the standard and what we will use here. If you're not sure why a mismatch may be an issue think of a Mercator projection and a 3D Spherical Map. You can't simply overlay them and expect them to match, they must be fitted one way or the other.
+```{r}
+# Transform Story polygon to NLCD CRS
+Story <- sf::st_transform(Story, raster::crs(nlcd_data_county))
+
+# Plot NLCD raster
+raster::plot(nlcd_data_county)
+
+# Overlay county boundary line
+Story %>%
+  sf::st_geometry() %>% # Extracts the geometry of the Story County polygon, i.e. the outline of the county
+  plot(border = "darkblue", lwd = 2, add = TRUE)
+
+```
+
+Above is what Story county (which contains ames) looks like in it's entirety via the NLCD database, the Dark Blue line represents the official boundary.
+
+However, depending on the amount of data you're working with you are wasting a lot of compute time processing data that is completely unnecessary.
+
+Tigris has multiple levels of data you can use. Use a fitting scale for your area of interest.
+
+Here we go from Iowa state to Ames the town skipping the county entirely. Then we pull the NLCD data set the polygon to CRS format and raster it. When in doubt always confirm your CRS when matching two files 70% of the errors we've encountered are due to mismatching CRS or accidentally clearing CRS from forming a data frame.
+```{r}
+# Get place boundaries for Iowa. places(): Fetches the boundaries for all places (cities, towns, etc.) in Iowa.
+cities <- places(state = "IA")
+
+# Filter for a specific city (e.g., "Ames")
+specific_city <- cities %>%
+  filter(NAME == "Ames")
+
+# Add city boundary to the plot
+specific_city %>%
+  sf::st_geometry() %>%
+  plot(border = "darkblue", lwd = 2)
+
+# Get NLCD data 
+nlcd_data <- 
+  FedData::get_nlcd(
+    template = specific_city,
+    year = 2011,
+    label = "Ames"
+  )
+
+# Transform Ames polygon to NLCD CRS
+specific_city <- sf::st_transform(specific_city, raster::crs(nlcd_data))
+
+
+# Plot NLCD raster and transformed Ames polygon
+raster::plot(nlcd_data)
+
+# Add city boundary to the plot
+specific_city %>%
+  sf::st_geometry() %>%
+  plot(border = "darkblue", lwd = 2, add = TRUE)
+
+```
+
+There are other data options with the NLCD that we won't use here such as elevation and temperature. For example the option below is canopy data AKA leaf coverage
+
+```{r}
+# Fetch NLCD canopy data for Ames
+NLCD_canopy <- 
+  FedData::get_nlcd(
+    template = specific_city,
+    year = 2011,
+    label = "Ames Canopy",     # Descriptive label for the dataset
+    dataset = "canopy"         # Dataset type (canopy/leaf coverage)
+  )
+
+# Plot the SpatRaster (NLCD canopy) directly
+raster::plot(NLCD_canopy)
+
+```
+
+Now we bring in the Ames data set that includes longitude latitude data for houses in Ames
+```{r}
+# Load the Ames dataset, which includes longitude and latitude data for houses
+ames <- read.table("geocoded_ames_plus_schooldist.csv", 
+                   header = TRUE,       # First row contains column names
+                   sep = ",",           # Comma-separated values
+                   stringsAsFactors = FALSE)  # Prevents automatic conversion of strings to factors
+head(ames)  # Display the first few rows of the dataset
+```
+
+This here is a basic plot of the home in longitude and latitude.
+
+```{r}
+# Convert the Ames dataset into a simple features (sf) object using longitude and latitude
+ames_sf <- st_as_sf(ames, coords = c('Longitude', 'Latitude'))
+
+# Create a basic map of the houses using ggplot2
+ggplot(ames_sf) + 
+  geom_sf() 
+
+```
+
+Here is the map again with the neighborhoods colored
+```{r}
+#Reducing the size of the Neighborhood variable to 10 characters. This makes the legend more manageable in size.
+ames_sf <- ames_sf %>% 
+  mutate(Neighborhood_Abbr = substring(Neighborhood, 0, 10))
+
+# Plot the map with neighborhoods distinguished by color
+ggplot(ames_sf) + 
+  geom_sf(aes(color = Neighborhood_Abbr)) +  # Color points by neighborhood
+  labs(color = "Neighborhoods") +           # Label for the legend
+  scale_fill_continuous(guide = guide_legend()) +  # Add a continuous legend
+  theme(legend.position = "right",          # Position the legend to the right
+        legend.direction = "vertical")      # Arrange legend items vertically
+
+```
+
+
+Satellite Visualization with OpenStreetMap
+
+OpenStreetMap provides a satellite view of Ames, Iowa, allowing us to visually assess the spatial data in context. While this step isn't necessary for our final analysis, it serves as a valuable tool to correlate the NLCD data points with real-world imagery.
+
+Note:
+The rJava package and Java itself (installed on your system) are prerequisites for this step. Ensure compatibility between your Java installation and R.
+```{r}
+# Define the spatial extent for OpenStreetMap
+lat1 <- min(ames$Latitude)  # Minimum latitude
+lat2 <- max(ames$Latitude)  # Maximum latitude
+lon1 <- min(ames$Longitude) # Minimum longitude
+lon2 <- max(ames$Longitude) # Maximum longitude
+
+ames_map <- openmap(
+  c(lat2, lon1),  # Top-left corner (lat, lon)
+  c(lat1, lon2),  # Bottom-right corner (lat, lon)
+  zoom = NULL,    # Automatically determine zoom level
+  type = "bing",  # Use Bing Maps as the base layer
+  mergeTiles = TRUE  # Combine tiles into one map
+)
+
+```
+
+This still needs to be turned into a projection we can use.
+```{r}
+# reproject onto WGS84
+ames_map <- openproj(ames_map)
+
+# Convert map into a ggplot-compatible object and add house points
+ames_map_plt <- OpenStreetMap::autoplot.OpenStreetMap(ames_map) + 
+  geom_sf(data = ames_sf,  # Add house locations from `ames_sf`
+          aes(x = ames$Longitude, y = ames$Latitude),
+          color = "red", size = 1) +  # Points are red for visibility
+  xlab("Longitude (°E)") + 
+  ylab("Latitude (°S)")
+
+ames_map_plt
+
+```
+
+This step helps you verify that your geographic data aligns accurately with the real-world context of Ames.
+
+Here we take the Ames NLCD data and set the CRS on the ames_sf. Removing this chunk will create an error when combining because there has to be a starting CRS value associated with the sf
+```{r}
+# Assigns CRS to match NLCD data (WGS84, EPSG:4326)
+st_crs(ames_sf) <- 4326 
+```
+
+
+
+Let's attempt a combination of NLCD and the houses.
+```{r}
+# Transform neighborhoods to match the NLCD CRS if not already done
+ames_sf_transformed <- st_transform(ames_sf, st_crs(nlcd_data)) 
+
+# Plot the NLCD raster
+plot(nlcd_data)
+
+# Overlay the neighborhood data
+plot(st_geometry(ames_sf_transformed), add = TRUE)
+
+```
+
+This particular output is messy but we're making progress
+
+Re-test neighborhood to make sure the new sf works
+```{r}
+#The only change here from the previous neighborhood coloring is in the dataframe chosen
+ggplot() +
+  geom_sf(data = ames_sf_transformed, aes(color = Neighborhood_Abbr)) +
+  theme_minimal() +
+  labs(color = "Neighborhood")
+```
+
+GGplot requires a data frame to work with, so the raster file must be interpreted into one.
+```{r}
+# Convert NLCD raster to a data frame for ggplot2
+nlcd_df <- as.data.frame(nlcd_data, xy = TRUE)  
+# The 'as.data.frame()' function transforms the raster object into a tabular data frame.
+# The 'xy = TRUE' parameter ensures that the x (longitude) and y (latitude) coordinates of each raster cell are included as columns.
+
+# The default column names here are x, y, and Class
+# Rename columns for clarity
+colnames(nlcd_df) <- c("Longitude", "Latitude", "Land_Cover")  
+
+# Here, we rename 'x' to 'Longitude', 'y' to 'Latitude', and 'class' to 'Land_Cover' for better readability.
+
+```
+
+
+
+
+```{r, fig.width=12, fig.height=8}
+# Use fig.width and fig.height to adjust the figure dimensions in the R Markdown chunk to avoid crushing the data into too small of a space, and for better visualizing
+
+# First plot: Ames neighborhoods overlaid on NLCD land cover
+ggplot() +
+  # Add the NLCD raster layer with land cover categories
+  geom_raster(data = nlcd_df, aes(x = Longitude, y = Latitude, fill = Land_Cover)) +
+  scale_fill_viridis_d(name = "Land Cover") + # Use a discrete viridis color scale for land cover categories
+  
+  # Overlay neighborhoods with neighborhood abbreviations as colors
+  geom_sf(data = ames_sf_transformed, aes(color = Neighborhood_Abbr), size = 1, fill = NA) +
+  theme_minimal() + # Minimal theme for a clean appearance
+  
+  # Add legend titles
+  labs(color = "Neighborhoods") +
+  
+  # Customize the theme, including plot margins
+  theme(
+    legend.position = "right", # Place the legend on the right side
+    plot.margin = unit(c(2, 4, 2, 2), "cm") # Set margins: top, right, bottom, left
+  )
+
+# Second plot: Ames neighborhoods with red overlay for better visibility, all other options identical, notice the home on the far right which blended in with the prior colors
+ggplot() +
+  geom_raster(data = nlcd_df, aes(x = Longitude, y = Latitude, fill = Land_Cover)) +
+  scale_fill_viridis_d(name = "Land Cover") +
+  geom_sf(data = ames_sf_transformed, aes(color = "red"), size = 1, fill = NA) + #Color change here
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    plot.margin = unit(c(2, 4, 2, 2), "cm")
+  )
+
+```
+
+Create buffers
+
+```{r, fig.width=12, fig.height=8}
+
+# This creates a buffer zone of 100 meters around each house feature in the spatial dataset, you may choose to use a greater or lesser buffer in your particular situation.
+houses_buffer <- st_buffer(ames_sf, dist = 100)
+
+# Transform the CRS of the buffer to match the NLCD raster CRS
+# Ensures that spatial operations and overlays are consistent
+houses_buffer <- st_transform(houses_buffer, crs = st_crs(nlcd_data))
+
+# Extract land cover data values within the new buffer
+# exact_extract retrieves raster values that intersect with each buffer zone
+land_cover_raw <- exact_extract(nlcd_data, houses_buffer)
+
+# Visualization of buffers over NLCD data
+ggplot() +
+  # Plot the NLCD raster layer
+  geom_raster(data = nlcd_df, aes(x = Longitude, y = Latitude, fill = Land_Cover)) +
+  scale_fill_viridis_d(name = "Land Cover") + # Viridis color scale for land cover categories
+  
+  # Add buffers as red polygons with some transparency
+  geom_sf(data = houses_buffer, fill = "red", alpha = 0.5) + 
+  
+  # Apply minimal theme for a clean layout
+  theme_minimal() 
+
+```
+
+Transform the output into readable data
+```{r}
+
+# Convert the list of extracted values to a data frame
+land_cover_df <- land_cover_raw %>%
+  # Apply a function to each element in the list, converting it into a data frame with frequency counts
+  lapply(function(x) as.data.frame(table(x$value))) %>%
+  # Combine all individual data frames into one, adding an ID column for each buffer
+  bind_rows(.id = "Buffer_ID") %>%
+  # Group by Buffer_ID for calculations within each buffer
+  group_by(Buffer_ID) %>%
+  # Calculate the proportion of each land cover type within each buffer
+  mutate(Proportion = Freq / sum(Freq))
+
+# Create a mapping from NLCD class codes to descriptive land cover types
+nlcd_mapping <- data.frame(
+    Column = c("11", "12", "21", "22", "23", "24", 
+               "31", "41", "42", "43", "51", 
+               "52", "71", "72", "73", "74", 
+               "81", "82", "90", "95"),  # NLCD land cover codes
+    Land_Cover_Type = c("Open Water", "Perennial Ice/Snow",
+                        "Developed, Open Space", "Developed, Low Intensity", 
+                        "Developed, Medium Intensity", "Developed, High Intensity", 
+                        "Barren Land", "Deciduous Forest", "Evergreen Forest", 
+                        "Mixed Forest", "Dwarf Scrub", "Shrub/Scrub", 
+                        "Grassland/Herbaceous", "Sedge/Herbaceous", 
+                        "Lichens", "Moss", "Pasture/Hay", 
+                        "Cultivated Crops", "Woody Wetlands", 
+                        "Emergent Herbaceous Wetlands")  # Descriptive names based on the land cover database
+)
+
+# Create a lookup map for translating NLCD codes to land cover types
+rename_map <- setNames(nlcd_mapping$Land_Cover_Type, nlcd_mapping$Column)
+
+# Add a new column to the data frame for land cover types
+land_cover_df <- land_cover_df %>%
+  mutate(
+    Land_Cover_Type = rename_map[as.character(Var1)]  # Map codes to land cover names
+  )
+
+# Check for any unmapped NLCD codes
+unmapped_values <- land_cover_df %>% filter(is.na(Land_Cover_Type))
+if (nrow(unmapped_values) > 0) {
+  message("Unmapped land cover types detected: ", 
+          paste(unique(unmapped_values$Var1), collapse = ", "))
+}
+
+# Optionally, filter out rows with NA land cover types to clean the data
+land_cover_df <- land_cover_df %>% filter(!is.na(Land_Cover_Type))
+
+# Summarize the cleaned and mapped data
+summary(land_cover_df)
+
+```
+
+Reattach to ames_sf
+```{r}
+# Pivot land_cover_df to wide format and convert Buffer_ID to integer
+land_cover_wide <- land_cover_df %>%
+  select(Buffer_ID, Land_Cover_Type, Proportion) %>%  # Select relevant columns for pivoting
+  pivot_wider(
+    names_from = Land_Cover_Type,  # Column names will be land cover types
+    values_from = Proportion,  # Cell values will be the proportion of each land cover type
+    values_fill = 0  # Fill missing land cover types with 0
+  ) %>%
+  mutate(Buffer_ID = as.integer(Buffer_ID))  # Convert Buffer_ID to integer for joining compatibility
+
+# Check the updated wide-format dataframe to confirm the structure
+head(land_cover_wide)
+
+```
+
+############### Before left join create Spatialized Ames for Later ###################
+```{r}
+ames_spatialized <- ames_sf
+```
+###################################################################################
+
+```{r}
+# Join the wide land cover data to ames_sf using Buffer_ID
+ames_sf <- ames_sf %>%
+  left_join(land_cover_wide, by = c("X" = "Buffer_ID"))  # Merge land cover data into spatial dataframe
+ames_sf_tib <- as_tibble(ames_sf)  # Convert the spatial dataframe into a tibble for easier inspection, this is purely for readability and not necessary
+
+# View the updated spatial dataframe with land cover proportions added
+head(ames_sf_tib)
+
+```
+
+How do we know it worked? Let's analyze house X 1 from the original data and buffer ID 1 from the added data.
+
+This section verifies the accuracy of the land cover data integration by examining the proportions for a specific house (X == 1) and its corresponding buffer (Buffer_ID == 1).
+```{r}
+# Filter for the first house (X == 1)
+house_1_stats <- land_cover_wide %>%
+  filter(Buffer_ID == 1) %>%  # Filter to the first buffer (ID 1)
+  pivot_longer(
+    cols = -Buffer_ID,  # Select all columns except Buffer_ID for reshaping
+    names_to = "Land_Cover_Type",  # Create a column for land cover types
+    values_to = "Proportion"  # Create a column for proportions
+  )
+
+# View the stats
+house_1_stats
+
+# Bar plot of proportions for house 1
+ggplot(house_1_stats, aes(x = Land_Cover_Type, y = Proportion, fill = Land_Cover_Type)) +
+  geom_bar(stat = "identity") +  # Create a bar chart where bar heights represent proportions
+  scale_fill_viridis_d(name = "Land Cover Type", guide = "none") +  # Discrete color scale
+  labs(
+    x = "Land Cover Type",  # X-axis label
+    y = "Proportion"  # Y-axis label
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels for readability
+```
+
+So we should expect to see these proportions around house #1 with zero land cover that matches Barren land or Mixed Forrest as an example.
+```{r, fig.width=12, fig.height=8}
+# Filter for the buffer and overlay it on the map
+house_1_buffer <- houses_buffer %>% filter(X == 1)  # Select buffer for house 1 using X == 1
+
+# Plot the buffer and NLCD data
+ggplot() +
+  geom_raster(data = nlcd_df, aes(x = Longitude, y = Latitude, fill = Land_Cover)) +
+  scale_fill_viridis_d(name = "Land Cover") +  # Use the viridis color scale for land cover types
+  geom_sf(data = house_1_buffer, fill = "red", alpha = 0.5) +  # Add house buffer in red with transparency
+  theme_minimal() +  # Clean theme for the map
+  labs(
+    x = "Longitude",  # X-axis label
+    y = "Latitude"  # Y-axis label
+  )
+```
+
+Well that's kind of hard to see so let's zoom in
+```{r}
+# Get the bounding box of the buffer for house 1
+house_1_bbox <- st_bbox(house_1_buffer)
+
+# Add some padding to the bounding box for better visualization
+padding <- 100  # Adjust as needed for your visualization
+zoom_bbox <- house_1_bbox + c(-padding, -padding, padding, padding)
+
+# Plot the zoomed-in map
+ggplot() +
+  geom_raster(data = nlcd_df, aes(x = Longitude, y = Latitude, fill = Land_Cover)) +
+  scale_fill_viridis_d(name = "Land Cover") +  # Color scale for land cover types
+  geom_sf(data = house_1_buffer, fill = "red", alpha = 0.1) +  # Overlay buffer in red with transparency
+  theme_minimal() +  # Minimalist theme
+  labs(
+    x = "Longitude",
+    y = "Latitude"
+  ) +
+  coord_sf(
+    xlim = c(zoom_bbox["xmin"], zoom_bbox["xmax"]),  # Limit x-axis to zoomed-in bounds
+    ylim = c(zoom_bbox["ymin"], zoom_bbox["ymax"])   # Limit y-axis to zoomed-in bounds
+  )
+```
+
+Visually it matches our expectations, but you can also see the detail limitation of the NLCD data we're using. Our recommendation is to use higher boundary distances for broader applications.
+```{r}
+# Calculate summary statistics for the entire dataset
+land_cover_summary <- land_cover_df %>%
+  group_by(Land_Cover_Type) %>%
+  summarise(
+    Mean_Proportion = mean(Proportion),  # Average proportion per buffer
+    SD_Proportion = sd(Proportion),  # Standard deviation of proportion
+    Min_Proportion = min(Proportion),  # Minimum proportion
+    Max_Proportion = max(Proportion)   # Maximum proportion
+  ) %>%
+  arrange(desc(Mean_Proportion)) #Arranges the land cover from highest average coverage around each home to the lowest
+
+# Print the summary statistics
+print(land_cover_summary)
+```
+
+From here we can tell that Low Intensity developed is the highest average proportion whereas barren land is the lowest at just 2.7%
+
+
+```{r}
+# Bar plot of the proportion of each land cover type across all buffers
+ggplot(land_cover_df, aes(x = Land_Cover_Type, y = Proportion, fill = Land_Cover_Type)) +
+  geom_bar(stat = "summary", fun = "mean", show.legend = FALSE) +
+  theme_minimal() +
+  coord_flip() +  # Flip axis for better readability
+  labs(
+    x = "Land Cover Type",
+    y = "Average Proportion"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+
+```{r}
+# Plot a boxplot of proportions by land cover type
+ggplot(land_cover_df, aes(x = Land_Cover_Type, y = Proportion, fill = Land_Cover_Type)) +
+  geom_boxplot() +
+  labs(
+       x = "Land Cover Type",
+       y = "Proportion") +
+  scale_fill_viridis_d(name = "Land Cover Type") +
+  theme_minimal() +
+  theme(
+    legend.position = "none",  # Remove legend
+    axis.text.x = element_text(angle = 45, hjust = 1)  # Rotate x-axis labels
+  )
+```
+
+
+```{r}
+# Frequency plot for a specific land cover type (e.g., "Developed, High Intensity")
+ggplot(land_cover_df %>% filter(Land_Cover_Type == "Developed, High Intensity"), 
+       aes(x = Proportion)) +
+  geom_histogram(fill = "steelblue", alpha = 0.6) +
+  theme_minimal() +
+  labs(
+    x = "Proportion",
+    y = "Frequency"
+  )
+
+```
+
+###############Creating Spatial Dataset #####################
+
+First we create 300m 600m and 1000m buffers and extract. Code is mostly repetition of previous work.
+
+Create df of county raster due to buffer size being too big and overlapping the blank zones
+```{r}
+# Convert NLCD raster to a data frame for ggplot2
+nlcd_county_df <- as.data.frame(nlcd_data_county, xy = TRUE)  
+# The 'as.data.frame()' function transforms the raster object into a tabular data frame.
+# The 'xy = TRUE' parameter ensures that the x (longitude) and y (latitude) coordinates of each raster cell are included as columns.
+
+# The default column names here are x, y, and Class
+# Rename columns for clarity
+colnames(nlcd_county_df) <- c("Longitude", "Latitude", "Land_Cover")  
+
+# Here, we rename 'x' to 'Longitude', 'y' to 'Latitude', and 'class' to 'Land_Cover' for better readability.
+
+```
+
+
+300m
+```{r, fig.width=12, fig.height=8}
+
+# This creates a buffer zone of 300 meters around each house feature in the spatial dataset.
+houses_buffer300 <- st_buffer(ames_spatialized, dist = 300)
+
+# Transform the CRS of the buffer to match the NLCD raster CRS
+# Ensures that spatial operations and overlays are consistent
+houses_buffer300 <- st_transform(houses_buffer300, crs = st_crs(nlcd_data_county))
+
+# Extract land cover data values within the new buffer
+# exact_extract retrieves raster values that intersect with each buffer zone
+land_cover_raw300 <- exact_extract(nlcd_data_county, houses_buffer300)
+
+# Visualization of buffers over NLCD data
+ggplot() +
+  # Plot the NLCD raster layer
+  geom_raster(data = nlcd_county_df, aes(x = Longitude, y = Latitude, fill = Land_Cover)) +
+  scale_fill_viridis_d(name = "Land Cover") + # Viridis color scale for land cover categories
+  
+  # Add buffers as red polygons with some transparency
+  geom_sf(data = houses_buffer300, fill = "red", alpha = 0.5) + 
+  
+  # Apply minimal theme for a clean layout
+  theme_minimal() 
+
+```
+
+Transform the output into readable data
+```{r}
+
+# Convert the list of extracted values to a data frame
+land_cover_df300 <- land_cover_raw300 %>%
+  # Apply a function to each element in the list, converting it into a data frame with frequency counts
+  lapply(function(x) as.data.frame(table(x$value))) %>%
+  # Combine all individual data frames into one, adding an ID column for each buffer
+  bind_rows(.id = "Buffer_ID") %>%
+  # Group by Buffer_ID for calculations within each buffer
+  group_by(Buffer_ID) %>%
+  # Calculate the proportion of each land cover type within each buffer
+  mutate(Proportion = Freq / sum(Freq))
+
+#Rename map already created, skipping this step
+
+# Add a new column to the data frame for land cover types
+land_cover_df300 <- land_cover_df300 %>%
+  mutate(
+    Land_Cover_Type = rename_map[as.character(Var1)]  # Map codes to land cover names
+  )
+
+# Check for any unmapped NLCD codes
+unmapped_values300 <- land_cover_df300 %>% filter(is.na(Land_Cover_Type))
+if (nrow(unmapped_values300) > 0) {
+  message("Unmapped land cover types detected: ", 
+          paste(unique(unmapped_values300$Var1), collapse = ", "))
+}
+
+# Optionally, filter out rows with NA land cover types to clean the data
+land_cover_df300 <- land_cover_df300 %>% filter(!is.na(Land_Cover_Type))
+
+# Summarize the cleaned and mapped data
+summary(land_cover_df300)
+
+```
+
+Reattach to ames_spatialized
+```{r}
+# Pivot land_cover_df to wide format and convert Buffer_ID to integer
+land_cover_wide300 <- land_cover_df300 %>%
+  select(Buffer_ID, Land_Cover_Type, Proportion) %>%  # Select relevant columns for pivoting
+  pivot_wider(
+    names_from = Land_Cover_Type,  # Column names will be land cover types
+    values_from = Proportion,  # Cell values will be the proportion of each land cover type
+    values_fill = 0  # Fill missing land cover types with 0
+  ) %>%
+  mutate(Buffer_ID = as.integer(Buffer_ID))  # Convert Buffer_ID to integer for joining compatibility
+
+# Check the updated wide-format dataframe to confirm the structure
+head(land_cover_wide300)
+
+```
+
+
+
+```{r}
+
+# Join the wide land cover data using Buffer_ID
+ames_spatialized_300m <- ames_spatialized %>%
+  left_join(land_cover_wide300, by = c("X" = "Buffer_ID"))  # Merge land cover data into spatial dataframe
+ames_spatialized_300m_tib <- as_tibble(ames_spatialized_300m)  # Convert the spatial dataframe into a tibble for easier inspection, this is purely for readability and not necessary
+
+# View the updated spatial dataframe with land cover proportions added
+head(ames_spatialized_300m_tib)
+
+```
+600m
+```{r, fig.width=12, fig.height=8}
+
+# This creates a buffer zone of 300 meters around each house feature in the spatial dataset.
+houses_buffer600 <- st_buffer(ames_spatialized, dist = 600)
+
+# Transform the CRS of the buffer to match the NLCD raster CRS
+# Ensures that spatial operations and overlays are consistent
+houses_buffer600 <- st_transform(houses_buffer600, crs = st_crs(nlcd_data_county))
+
+# Extract land cover data values within the new buffer
+# exact_extract retrieves raster values that intersect with each buffer zone
+land_cover_raw600 <- exact_extract(nlcd_data_county, houses_buffer600)
+
+# Visualization of buffers over NLCD data
+ggplot() +
+  # Plot the NLCD raster layer
+  geom_raster(data = nlcd_county_df, aes(x = Longitude, y = Latitude, fill = Land_Cover)) +
+  scale_fill_viridis_d(name = "Land Cover") + # Viridis color scale for land cover categories
+  
+  # Add buffers as red polygons with some transparency
+  geom_sf(data = houses_buffer600, fill = "red", alpha = 0.5) + 
+  
+  # Apply minimal theme for a clean layout
+  theme_minimal() 
+
+```
+
+Transform the output into readable data
+```{r}
+
+# Convert the list of extracted values to a data frame
+land_cover_df600 <- land_cover_raw600 %>%
+  # Apply a function to each element in the list, converting it into a data frame with frequency counts
+  lapply(function(x) as.data.frame(table(x$value))) %>%
+  # Combine all individual data frames into one, adding an ID column for each buffer
+  bind_rows(.id = "Buffer_ID") %>%
+  # Group by Buffer_ID for calculations within each buffer
+  group_by(Buffer_ID) %>%
+  # Calculate the proportion of each land cover type within each buffer
+  mutate(Proportion = Freq / sum(Freq))
+
+#Rename map already created, skipping this step
+
+# Add a new column to the data frame for land cover types
+land_cover_df600 <- land_cover_df600 %>%
+  mutate(
+    Land_Cover_Type = rename_map[as.character(Var1)]  # Map codes to land cover names
+  )
+
+# Check for any unmapped NLCD codes
+unmapped_values600 <- land_cover_df600 %>% filter(is.na(Land_Cover_Type))
+if (nrow(unmapped_values600) > 0) {
+  message("Unmapped land cover types detected: ", 
+          paste(unique(unmapped_values300$Var1), collapse = ", "))
+}
+
+# Optionally, filter out rows with NA land cover types to clean the data
+land_cover_df600 <- land_cover_df600 %>% filter(!is.na(Land_Cover_Type))
+
+# Summarize the cleaned and mapped data
+summary(land_cover_df600)
+
+```
+
+Reattach to ames_2010
+```{r}
+# Pivot land_cover_df to wide format and convert Buffer_ID to integer
+land_cover_wide600 <- land_cover_df600 %>%
+  select(Buffer_ID, Land_Cover_Type, Proportion) %>%  # Select relevant columns for pivoting
+  pivot_wider(
+    names_from = Land_Cover_Type,  # Column names will be land cover types
+    values_from = Proportion,  # Cell values will be the proportion of each land cover type
+    values_fill = 0  # Fill missing land cover types with 0
+  ) %>%
+  mutate(Buffer_ID = as.integer(Buffer_ID))  # Convert Buffer_ID to integer for joining compatibility
+
+# Check the updated wide-format dataframe to confirm the structure
+head(land_cover_wide600)
+
+```
+
+```{r}
+
+# Join the wide land cover data using Buffer_ID
+ames_spatialized_600m <- ames_spatialized %>%
+  left_join(land_cover_wide600, by = c("X" = "Buffer_ID"))  # Merge land cover data into spatial dataframe
+ames_spatialized_600m_tib <- as_tibble(ames_spatialized_600m)  # Convert the spatial dataframe into a tibble for easier inspection, this is purely for readability and not necessary
+
+# View the updated spatial dataframe with land cover proportions added
+head(ames_spatialized_600m_tib)
+
+
+```
+
+1000m
+```{r, fig.width=12, fig.height=8}
+
+# This creates a buffer zone of 300 meters around each house feature in the spatial dataset.
+houses_buffer1000 <- st_buffer(ames_spatialized, dist = 1000)
+
+# Transform the CRS of the buffer to match the NLCD raster CRS
+# Ensures that spatial operations and overlays are consistent
+houses_buffer1000 <- st_transform(houses_buffer1000, crs = st_crs(nlcd_data_county))
+
+# Extract land cover data values within the new buffer
+# exact_extract retrieves raster values that intersect with each buffer zone
+land_cover_raw1000 <- exact_extract(nlcd_data_county, houses_buffer1000)
+
+# Visualization of buffers over NLCD data
+ggplot() +
+  # Plot the NLCD raster layer
+  geom_raster(data = nlcd_county_df, aes(x = Longitude, y = Latitude, fill = Land_Cover)) +
+  scale_fill_viridis_d(name = "Land Cover") + # Viridis color scale for land cover categories
+  
+  # Add buffers as red polygons with some transparency
+  geom_sf(data = houses_buffer1000, fill = "red", alpha = 0.5) + 
+  
+  # Apply minimal theme for a clean layout
+  theme_minimal() 
+
+```
+
+Transform the output into readable data
+```{r}
+
+# Convert the list of extracted values to a data frame
+land_cover_df1000 <- land_cover_raw1000 %>%
+  # Apply a function to each element in the list, converting it into a data frame with frequency counts
+  lapply(function(x) as.data.frame(table(x$value))) %>%
+  # Combine all individual data frames into one, adding an ID column for each buffer
+  bind_rows(.id = "Buffer_ID") %>%
+  # Group by Buffer_ID for calculations within each buffer
+  group_by(Buffer_ID) %>%
+  # Calculate the proportion of each land cover type within each buffer
+  mutate(Proportion = Freq / sum(Freq))
+
+#Rename map already created, skipping this step
+
+# Add a new column to the data frame for land cover types
+land_cover_df1000 <- land_cover_df1000 %>%
+  mutate(
+    Land_Cover_Type = rename_map[as.character(Var1)]  # Map codes to land cover names
+  )
+
+# Check for any unmapped NLCD codes
+unmapped_values900 <- land_cover_df600 %>% filter(is.na(Land_Cover_Type))
+if (nrow(unmapped_values900) > 0) {
+  message("Unmapped land cover types detected: ", 
+          paste(unique(unmapped_values300$Var1), collapse = ", "))
+}
+
+# Optionally, filter out rows with NA land cover types to clean the data
+land_cover_df1000 <- land_cover_df1000 %>% filter(!is.na(Land_Cover_Type))
+
+# Summarize the cleaned and mapped data
+summary(land_cover_df1000)
+
+```
+
+Reattach to ames_2010
+```{r}
+# Pivot land_cover_df to wide format and convert Buffer_ID to integer
+land_cover_wide1000 <- land_cover_df1000 %>%
+  select(Buffer_ID, Land_Cover_Type, Proportion) %>%  # Select relevant columns for pivoting
+  pivot_wider(
+    names_from = Land_Cover_Type,  # Column names will be land cover types
+    values_from = Proportion,  # Cell values will be the proportion of each land cover type
+    values_fill = 0  # Fill missing land cover types with 0
+  ) %>%
+  mutate(Buffer_ID = as.integer(Buffer_ID))  # Convert Buffer_ID to integer for joining compatibility
+
+# Check the updated wide-format dataframe to confirm the structure
+head(land_cover_wide1000)
+
+```
+
+```{r}
+
+# Join the wide land cover data using Buffer_ID
+ames_spatialized_1000m <- ames_spatialized %>%
+  left_join(land_cover_wide1000, by = c("X" = "Buffer_ID"))  # Merge land cover data into spatial dataframe
+ames_spatialized_1000m_tib <- as_tibble(ames_spatialized_1000m)  # Convert the spatial dataframe into a tibble for easier inspection, this is purely for readability and not necessary
+
+# View the updated spatial dataframe with land cover proportions added
+head(ames_spatialized_1000m)
+
+```
+
+Combine the new data into one
+```{r}
+# Function to rename land cover columns
+rename_land_cover <- function(data, distance) {
+  data %>%
+    rename_with(~ paste0(., " ", distance), 
+                matches("^(Open Water|Perennial Ice/Snow|Developed, Open Space|Developed, Low Intensity|Developed, Medium Intensity|Developed, High Intensity|Barren Land|Deciduous Forest|Evergreen Forest|Mixed Forest|Dwarf Scrub|Shrub/Scrub|Grassland/Herbaceous|Sedge/Herbaceous|Lichens|Moss|Pasture/Hay|Cultivated Crops|Woody Wetlands|Emergent Herbaceous Wetlands)$"))
+}
+
+# Rename land cover columns
+houses_300m <- rename_land_cover(ames_spatialized_300m, "300m")
+houses_600m <- rename_land_cover(ames_spatialized_600m, "600m")
+houses_1000m <- rename_land_cover(ames_spatialized_1000m, "1000m")
+
+# Combine datasets (assuming they have the same number of rows and identical other columns)
+combined_houses <- bind_cols(
+  houses_300m,
+  select(houses_600m, matches("^(Open Water|Perennial Ice/Snow|Developed, Open Space|Developed, Low Intensity|Developed, Medium Intensity|Developed, High Intensity|Barren Land|Deciduous Forest|Evergreen Forest|Mixed Forest|Dwarf Scrub|Shrub/Scrub|Grassland/Herbaceous|Sedge/Herbaceous|Lichens|Moss|Pasture/Hay|Cultivated Crops|Woody Wetlands|Emergent Herbaceous Wetlands) 600m$")),
+  select(houses_1000m, matches("^(Open Water|Perennial Ice/Snow|Developed, Open Space|Developed, Low Intensity|Developed, Medium Intensity|Developed, High Intensity|Barren Land|Deciduous Forest|Evergreen Forest|Mixed Forest|Dwarf Scrub|Shrub/Scrub|Grassland/Herbaceous|Sedge/Herbaceous|Lichens|Moss|Pasture/Hay|Cultivated Crops|Woody Wetlands|Emergent Herbaceous Wetlands) 1000m$"))
+)
+
+# View combined dataset
+head(combined_houses)
+
+```
+
+Output Spacialized Ames File
+```{r}
+# Save table as a CSV file
+combined_houses %>%
+  write_csv("ames_spatialized.csv")
+
+```
