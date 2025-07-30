@@ -1507,8 +1507,10 @@ head(combined_houses)
 
 ```
 
-
-
+Shrub/Scrub 300m has some NA values and some zeros, the source of this issue is that the landcover only occurs in the collum,n twice in the 0607 year prior to the rowbind and misses our zeroing out code. Correcting it here
+```{r}
+combined_houses$`Shrub/Scrub 300m`[is.na(combined_houses$`Shrub/Scrub 300m`)] <- 0
+```
 
 
 
